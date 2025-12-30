@@ -5,15 +5,34 @@
  * - 定时每30秒访问指定的Hugging Face Space URL
  * - 自动解析和刷新Cookie以维持会话
  * - 智能检测保活状态（成功/失败）
+ * - 可选的JWT token自动刷新功能
  *
  * 使用方法：
  * 1. 本地运行：export TARGET_URL="..." && export CURRENT_COOKIE="..." && npm run dev
  * 2. Docker运行：docker run -e TARGET_URL=... -e CURRENT_COOKIE=... hf-keep-alive
+ * 3. 配置文件：node dist/index.js --config config.json
+ *
+ * 可选环境变量：
+ * - JWT_API_URL：JWT刷新API地址（如：https://huggingface.co/api/spaces/.../jwt?...）
+ * - JWT_COOKIE：JWT刷新所需的Cookie（包含token等认证信息）
+ * - CONFIG_FILE：配置文件路径（JSON格式），优先级高于环境变量
+ *
+ * 配置文件格式（config.json）：
+ * {
+ *   "targetUrl": "https://...",
+ *   "currentCookie": "spaces-jwt=...",
+ *   "jwtApiUrl": "https://...",
+ *   "jwtCookie": "token=...",
+ *   "interval": 30000,
+ *   "expectedStatusCodes": [200, 400]
+ * }
  */
 
 import { request } from "undici";
 import * as cookie from "cookie";
 import { env } from "process";
+import { readFileSync } from "fs";
+import { resolve } from "path";
 
 // ==================== 配置部分 ====================
 
@@ -22,15 +41,79 @@ interface Config {
   cookie: string;
   interval: number;
   expectedStatusCodes: number[];
+  jwtApiUrl: string;
+  jwtCookie: string;
 }
 
+/**
+ * 配置文件接口
+ */
+interface ConfigFile {
+  targetUrl?: string;
+  currentCookie?: string;
+  jwtApiUrl?: string;
+  jwtCookie?: string;
+  interval?: number;
+  expectedStatusCodes?: number[];
+}
+
+/**
+ * 从配置文件读取配置
+ */
+function loadConfigFromFile(configPath: string): Partial<Config> {
+  try {
+    const resolvedPath = resolve(configPath);
+    const fileContent = readFileSync(resolvedPath, "utf-8");
+    const configData: ConfigFile = JSON.parse(fileContent);
+
+    console.log(`✅ 成功读取配置文件：${resolvedPath}`);
+
+    return {
+      url: configData.targetUrl,
+      cookie: configData.currentCookie,
+      jwtApiUrl: configData.jwtApiUrl || "",
+      jwtCookie: configData.jwtCookie || "",
+      interval: configData.interval || 30000,
+      expectedStatusCodes: configData.expectedStatusCodes || [200],
+    };
+  } catch (error) {
+    if (error instanceof Error) {
+      console.error(`❌ 读取配置文件失败：${error.message}`);
+    } else {
+      console.error(`❌ 读取配置文件失败：${String(error)}`);
+    }
+    process.exit(1);
+  }
+}
+
+/**
+ * 获取命令行参数
+ */
+function getConfigFilePath(): string | null {
+  const args = process.argv.slice(2);
+  const configIndex = args.indexOf("--config");
+
+  if (configIndex !== -1 && configIndex + 1 < args.length) {
+    return args[configIndex + 1];
+  }
+
+  return env.CONFIG_FILE || null;
+}
+
+// 初始化配置
+const configFilePath = getConfigFilePath();
+const fileConfig = configFilePath ? loadConfigFromFile(configFilePath) : {};
+
 const CONFIG: Config = {
-  url: env.TARGET_URL || "",
-  cookie: env.CURRENT_COOKIE || "",
-  interval: 30000, // 30秒
-  expectedStatusCodes: env.EXPECTED_STATUS_CODES
-    ? env.EXPECTED_STATUS_CODES.split(",").map((code) => parseInt(code, 10))
-    : [200], // 默认期望 200 状态码
+  url: fileConfig.url || env.TARGET_URL || "",
+  cookie: fileConfig.cookie || env.CURRENT_COOKIE || "",
+  interval: fileConfig.interval || (env.INTERVAL ? parseInt(env.INTERVAL, 10) : 30000),
+  expectedStatusCodes: fileConfig.expectedStatusCodes ||
+    (env.EXPECTED_STATUS_CODES
+      ? env.EXPECTED_STATUS_CODES.split(",").map((code) => parseInt(code, 10))
+      : [200]),
+  jwtApiUrl: fileConfig.jwtApiUrl || env.JWT_API_URL || "",
+  jwtCookie: fileConfig.jwtCookie || env.JWT_COOKIE || "",
 };
 
 // 失败检测标记
@@ -84,20 +167,33 @@ let cookieData: CookieObject = {};
  */
 function initCookie(): void {
   try {
-    // 使用 parseCookie 解析 Cookie header 字符串
-    const parsed = cookie.parseCookie(CONFIG.cookie);
-    // 将解析结果转换为 CookieObject 类型，确保所有值都是 string
-    cookieData = Object.entries(parsed).reduce(
-      (acc: CookieObject, [key, value]) => {
+    // 合并主cookie和JWT cookie
+    const allCookieStrings: string[] = [];
+
+    if (CONFIG.cookie) {
+      allCookieStrings.push(CONFIG.cookie);
+    }
+
+    if (CONFIG.jwtCookie) {
+      allCookieStrings.push(CONFIG.jwtCookie);
+    }
+
+    // 解析所有cookie字符串并合并
+    const mergedCookies: CookieObject = {};
+
+    for (const cookieStr of allCookieStrings) {
+      const parsed = cookie.parseCookie(cookieStr);
+      Object.entries(parsed).forEach(([key, value]) => {
         if (value !== undefined) {
-          acc[key] = value;
+          mergedCookies[key] = value;
         }
-        return acc;
-      },
-      {},
-    );
+      });
+    }
+
+    cookieData = mergedCookies;
+
     console.log("✅ Cookie解析成功");
-    console.log("🍪 解析后的Cookie内容：", JSON.stringify(parsed, null, 2));
+    console.log("🍪 解析后的Cookie内容：", JSON.stringify(cookieData, null, 2));
   } catch (error) {
     console.error("❌ Cookie解析失败：", error);
     process.exit(1);
@@ -131,6 +227,105 @@ function updateCookies(setCookieHeaders: string[]): void {
   }
 }
 
+// ==================== JWT Token 刷新 ====================
+
+/**
+ * JWT API 响应接口
+ */
+interface JwtApiResponse {
+  token: string;
+  accessToken: string;
+  exp: number;
+  encryptedToken: {
+    encrypted: string;
+    keyId: string;
+  };
+}
+
+/**
+ * 刷新 JWT token
+ * @returns 新的 token 字符串，如果刷新失败则返回 null
+ */
+async function refreshJwtToken(): Promise<string | null> {
+  if (!CONFIG.jwtApiUrl || !CONFIG.jwtCookie) {
+    // 如果未配置JWT相关环境变量，跳过刷新
+    return null;
+  }
+
+  const timestamp = getTimestamp();
+
+  try {
+    console.log(`\n[${timestamp}] 🔑 正在刷新 JWT token...`);
+    console.log(`[${timestamp}] 🔑 JWT API URL：${CONFIG.jwtApiUrl}`);
+
+    // 发送GET请求到JWT API
+    const response = await request(CONFIG.jwtApiUrl, {
+      headers: {
+        "accept": "*/*",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "cookie": serializeCookie(), // 使用当前的cookie而不是固定的jwtCookie
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+      },
+      headersTimeout: 30000,
+      bodyTimeout: 30000,
+    });
+
+    // 处理JWT API返回的Cookie更新
+    const setCookieHeaders = response.headers["set-cookie"];
+    if (setCookieHeaders && Array.isArray(setCookieHeaders)) {
+      console.log(`[${timestamp}] 🍪 检测到JWT API Cookie更新`);
+      updateCookies(setCookieHeaders);
+    }
+
+    // 读取响应体
+    const responseBody = await response.body.text();
+
+    if (response.statusCode !== 200) {
+      console.error(`[${timestamp}] ❌ JWT token刷新失败：HTTP ${response.statusCode}`);
+      console.error(`[${timestamp}] 响应：${responseBody.substring(0, 200)}...`);
+      return null;
+    }
+
+    // 解析JSON响应
+    const jwtResponse: JwtApiResponse = JSON.parse(responseBody);
+
+    console.log(`[${timestamp}] ✅ JWT token刷新成功`);
+    console.log(`[${timestamp}] 🔑 新token：${jwtResponse.token.substring(0, 50)}...`);
+
+    // 返回新的token
+    return jwtResponse.token;
+  } catch (error: unknown) {
+    if (error instanceof Error) {
+      console.error(`[${timestamp}] ❌ JWT token刷新异常：${error.message}`);
+    } else {
+      console.error(`[${timestamp}] ❌ JWT token刷新异常：${String(error)}`);
+    }
+    return null;
+  }
+}
+
+/**
+ * 更新URL中的__sign参数
+ * @param url 原始URL
+ * @param token 新的JWT token
+ * @returns 更新后的URL
+ */
+function updateUrlSignParam(url: string, token: string): string {
+  try {
+    const urlObj = new URL(url);
+
+    // 更新或添加__sign参数
+    urlObj.searchParams.set("__sign", token);
+
+    return urlObj.toString();
+  } catch (error) {
+    console.error("⚠️ 更新URL参数失败：", error);
+    return url;
+  }
+}
+
 // ==================== 保活检测 ====================
 
 /**
@@ -156,13 +351,23 @@ async function keepAlive(): Promise<void> {
   const timestamp = getTimestamp();
 
   try {
-    console.log(`\n[${timestamp}] 🔄 正在访问：${CONFIG.url}`);
+    // 如果配置了JWT相关参数，先刷新token
+    let targetUrl = CONFIG.url;
+    if (CONFIG.jwtApiUrl && CONFIG.jwtCookie) {
+      const newToken = await refreshJwtToken();
+      if (newToken) {
+        targetUrl = updateUrlSignParam(CONFIG.url, newToken);
+        console.log(`[${timestamp}] 🔗 已更新URL的__sign参数`);
+      }
+    }
+
+    console.log(`\n[${timestamp}] 🔄 正在访问：${targetUrl}`);
 
     const cookieHeader = serializeCookie();
     console.log(`[${timestamp}] 🍪 发送的Cookie：${cookieHeader}`);
 
     // 发送GET请求
-    const response = await request(CONFIG.url, {
+    const response = await request(targetUrl, {
       headers: {
         "Cookie": cookieHeader,
         "User-Agent":
@@ -247,6 +452,12 @@ async function main(): Promise<void> {
   console.log(`   目标URL：${CONFIG.url}`);
   console.log(`   刷新间隔：${CONFIG.interval / 1000}秒`);
   console.log(`   期望状态码：${CONFIG.expectedStatusCodes.join(", ")}`);
+  if (CONFIG.jwtApiUrl && CONFIG.jwtCookie) {
+    console.log(`   JWT刷新：已启用`);
+    console.log(`   JWT API URL：${CONFIG.jwtApiUrl}`);
+  } else {
+    console.log(`   JWT刷新：未配置（可选）`);
+  }
   console.log("");
 
   // 初始化Cookie
