@@ -8,8 +8,7 @@ Cookie，有效防止服务因长时间无访问而进入休眠状态。
 
 - **定时保活**：每 30 秒自动访问目标 URL，保持服务活跃状态
 - **智能 Cookie 管理**：自动解析和更新 Cookie，处理服务器返回的会话刷新
-- **JWT Token 自动刷新**：可选的 JWT token 自动刷新功能，自动更新 URL 中的
-  `__sign` 参数
+- **自动提取 iframe URL**：从 Space 页面自动提取真实的 iframe URL
 - **失败检测**：内置双重失败检测机制，通过检测页面内容判断服务状态
 - **配置文件支持**：支持通过 JSON 配置文件启动，优先级高于环境变量
 - **Docker 容器化**：提供完整的 Dockerfile，支持容器化部署
@@ -36,10 +35,9 @@ Cookie，有效防止服务因长时间无访问而进入休眠状态。
 
 ```json
 {
+  "spaceUrl": "https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE",
   "targetUrl": "https://your-space.hf.space/?__sign=YOUR_INITIAL_TOKEN",
   "currentCookie": "spaces-jwt=YOUR_SPACES_JWT",
-  "jwtApiUrl": "https://huggingface.co/api/spaces/YOUR_USERNAME/YOUR_SPACE/jwt?expiration=EXPIRATION_DATE&include_pro_status=true&encrypted=true",
-  "jwtCookie": "token=YOUR_TOKEN; __stripe_mid=YOUR_STRIPE_MID; __stripe_sid=YOUR_STRIPE_SID; aws-waf-token=YOUR_AWS_WAF_TOKEN",
   "interval": 30000,
   "expectedStatusCodes": [200, 400]
 }
@@ -67,7 +65,7 @@ cd hugging-face-docker-automatic-keep-alive
 pnpm install
 
 # 设置环境变量并运行
-export TARGET_URL="https://your-space.hf.space/?__sign=..."
+export SPACE_URL="https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE"
 export CURRENT_COOKIE="spaces-jwt=eyJhbGciOiJFZERTQSJ9..."
 pnpm dev
 ```
@@ -79,7 +77,7 @@ pnpm dev
 pnpm build
 
 # 设置环境变量并运行
-export TARGET_URL="https://your-space.hf.space/?__sign=..."
+export SPACE_URL="https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE"
 export CURRENT_COOKIE="spaces-jwt=eyJhbGciOiJFZERTQSJ9..."
 pnpm start
 ```
@@ -93,7 +91,7 @@ docker build -t hf-keep-alive .
 # 运行容器（使用环境变量）
 docker run -d \
   --name hf-keep-alive-container \
-  -e TARGET_URL="https://your-space.hf.space/?__sign=..." \
+  -e SPACE_URL="https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE" \
   -e CURRENT_COOKIE="spaces-jwt=eyJhbGciOiJFZERTQSJ9..." \
   hf-keep-alive
 
@@ -123,7 +121,7 @@ services:
     container_name: hf-keep-alive
     restart: unless-stopped
     environment:
-      - TARGET_URL=https://your-space.hf.space/?__sign=...
+      - SPACE_URL=https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE
       - CURRENT_COOKIE=spaces-jwt=eyJhbGciOiJFZERTQSJ9...
 ```
 
@@ -140,26 +138,26 @@ docker-compose logs -f
 
 | 变量名                  | 描述                                                  | 是否必填 | 默认值 |
 | ----------------------- | ----------------------------------------------------- | -------- | ------ |
-| `TARGET_URL`            | 要保活的完整 Hugging Face Space URL，包含所有查询参数 | 是*      | 无     |
-| `CURRENT_COOKIE`        | 当前的 Cookie 字符串（通常是 `spaces-jwt=...` 格式）  | 是*      | 无     |
-| `JWT_API_URL`           | JWT 刷新 API 地址                                     | 否       | 无     |
-| `JWT_COOKIE`            | JWT 刷新所需的 Cookie（包含 token 等认证信息）        | 否       | 无     |
+| `SPACE_URL`             | Hugging Face Space 页面 URL                            | 否*      | 无     |
+| `TARGET_URL`            | 要保活的完整 Hugging Face Space URL，包含所有查询参数 | 否*      | 无     |
+| `CURRENT_COOKIE`        | 当前的 Cookie 字符串（通常是 `spaces-jwt=...` 格式）  | 是       | 无     |
 | `INTERVAL`              | 请求间隔时间（毫秒），最小值为 10000                  | 否       | 30000  |
 | `EXPECTED_STATUS_CODES` | 期望的 HTTP 状态码列表，多个用逗号分隔                | 否       | `200`  |
 | `CONFIG_FILE`           | 配置文件路径                                          | 否       | 无     |
 
-*注意：如果使用配置文件，这些变量可以省略。
+*注意：`SPACE_URL` 和 `TARGET_URL` 至少需要设置一个。如果设置了 `SPACE_URL`，工具会自动从页面提取 iframe URL 进行访问。
 
 ### 配置文件字段
 
 | 字段名                | 描述                                | 是否必填 | 默认值 |
 | --------------------- | ----------------------------------- | -------- | ------ |
-| `targetUrl`           | 要保活的完整 Hugging Face Space URL | 是       | 无     |
+| `spaceUrl`            | Hugging Face Space 页面 URL         | 否*      | 无     |
+| `targetUrl`           | 要保活的完整 Hugging Face Space URL | 否*      | 无     |
 | `currentCookie`       | 当前的 Cookie 字符串                | 是       | 无     |
-| `jwtApiUrl`           | JWT 刷新 API 地址（可选）           | 否       | 无     |
-| `jwtCookie`           | JWT 刷新所需的 Cookie（可选）       | 否       | 无     |
 | `interval`            | 请求间隔时间（毫秒）                | 否       | 30000  |
 | `expectedStatusCodes` | 期望的 HTTP 状态码数组              | 否       | [200]  |
+
+*注意：`spaceUrl` 和 `targetUrl` 至少需要设置一个。推荐设置 `spaceUrl`，让工具自动提取 iframe URL。
 
 **示例**：
 
@@ -190,76 +188,41 @@ docker-compose logs -f
 6. 找到 `spaces-jwt` 或其他认证相关的 Cookie
 7. 复制值
 
-### 获取 JWT API 信息（可选）
-
-如果需要启用 JWT token 自动刷新功能，需要获取以下信息：
-
-1. **JWT API URL**：
-   - 从浏览器 Network 标签中找到对 `/api/spaces/.../jwt` 的请求
-   - 复制完整的请求 URL，包括所有查询参数
-
-2. **JWT Cookie**：
-   - 从该请求的 Request Headers 中复制 Cookie 字段
-   - 通常包含 `token`、`__stripe_mid`、`__stripe_sid`、`aws-waf-token` 等
-
 ## 输出示例
 
-### 基础保活（不含JWT）
+### 基础保活（自动提取 iframe URL）
 
 ```
 ╔════════════════════════════════════════════════════════════╗
-║   Hugging Face Space 自动保活工具 v1.0.0                   ║
-║   自动刷新Cookie，定时访问，保持服务活跃                   ║
+║   Hugging Face Space 自动保活工具 v2.0.0                   ║
+║   自动提取iframe URL，刷新Cookie，定时访问                 ║
 ╚════════════════════════════════════════════════════════════╝
 
 📋 配置信息：
-   目标URL：https://masx200-xxx.hf.space/?__sign=...
+   Space页面URL：https://huggingface.co/spaces/username/space-name
    刷新间隔：30秒
-   JWT刷新：未配置（可选）
+   期望状态码：200
 
 ✅ Cookie解析成功
 
 🚀 启动保活服务...
 
-[2024-12-30T21:00:00.000Z] 🔄 正在访问：https://masx200-xxx.hf.space/?__sign=...
+[2024-12-30T21:00:00.000Z] 🔄 正在访问 Space 页面：https://huggingface.co/spaces/username/space-name
+✅ 成功提取 iframe URL：https://username-space.hf.space/?__sign=...
 [2024-12-30T21:00:00.500Z] ✅ 保活成功：HTTP状态码 200
 
-[2024-12-30T21:00:30.000Z] 🔄 正在访问：https://masx200-xxx.hf.space/?__sign=...
+[2024-12-30T21:00:30.000Z] 🔄 正在访问 Space 页面：https://huggingface.co/spaces/username/space-name
+✅ 成功提取 iframe URL：https://username-space.hf.space/?__sign=...
 [2024-12-30T21:00:31.000Z] 🍪 检测到Cookie更新
+  ✅ 更新Cookie: spaces-jwt = eyJhbGciOiJFZERTQSJ9...
+🍪 已更新域名 [username-space.hf.space] 的 1 个Cookie
 [2024-12-30T21:00:31.100Z] ✅ 保活成功：HTTP状态码 200
-```
-
-### 启用JWT自动刷新
-
-```
-╔════════════════════════════════════════════════════════════╗
-║   Hugging Face Space 自动保活工具 v1.0.0                   ║
-║   自动刷新Cookie，定时访问，保持服务活跃                   ║
-╚════════════════════════════════════════════════════════════╝
-
-📋 配置信息：
-   目标URL：https://masx200-xxx.hf.space/?__sign=...
-   刷新间隔：30秒
-   JWT刷新：已启用
-   JWT API URL：https://huggingface.co/api/spaces/.../jwt
-
-✅ Cookie解析成功
-
-🚀 启动保活服务...
-
-[2024-12-30T21:00:00.000Z] 🔑 正在刷新 JWT token...
-[2024-12-30T21:00:00.100Z] 🔑 JWT API URL：https://huggingface.co/api/spaces/...
-[2024-12-30T21:00:00.200Z] 🍪 检测到JWT API Cookie更新
-[2024-12-30T21:00:00.300Z] ✅ JWT token刷新成功
-[2024-12-30T21:00:00.310Z] 🔗 已更新URL的__sign参数
-[2024-12-30T21:00:00.320Z] 🔄 正在访问：https://masx200-xxx.hf.space/?__sign=NEW_TOKEN...
-[2024-12-30T21:00:00.820Z] ✅ 保活成功：HTTP状态码 200
 ```
 
 ### 失败示例
 
 ```
-[2024-12-30T21:01:00.000Z] 🔄 正在访问：https://masx200-xxx.hf.space/?__sign=...
+[2024-12-30T21:01:00.000Z] 🔄 正在访问：https://username-space.hf.space/?__sign=...
 [2024-12-30T21:01:00.200Z] ❌ 保活失败：检测到失败标记
 [2024-12-30T21:01:00.200Z] HTTP状态码：404
 [2024-12-30T21:01:00.200Z] 失败原因：页面不存在或服务已失效
@@ -279,14 +242,15 @@ hugging-face-docker-automatic-keep-alive/
 
 ## 依赖说明
 
-| 依赖            | 版本    | 用途                               |
-| --------------- | ------- | ---------------------------------- |
-| `axios`         | ^1.6.0  | HTTP请求库，用于发送保活请求       |
-| `cookie`        | 1.1.1   | Cookie解析库，用于解析和更新Cookie |
-| `@types/cookie` | ^0.6.0  | Cookie类型定义                     |
-| `@types/node`   | ^20.0.0 | Node.js类型定义                    |
-| `ts-node`       | ^10.9.0 | TypeScript执行环境                 |
-| `typescript`    | ^5.0.0  | TypeScript编译器                   |
+| 依赖               | 版本      | 用途                              |
+| ------------------ | --------- | --------------------------------- |
+| `undici`           | ^7.16.0   | HTTP/1.1 客户端（Node.js 原生）   |
+| `cookie`           | 1.1.1     | Cookie 解析库                     |
+| `cheerio`          | ^1.0.0    | HTML 解析，用于提取 iframe URL    |
+| `@types/cookie`    | ^0.6.0    | Cookie 类型定义                   |
+| `@types/node`      | ^20.19.27 | Node.js 类型定义                  |
+| `tsx`              | ^4.19.0   | TypeScript 执行环境（支持 ESM）   |
+| `typescript`       | ^5.0.0    | TypeScript 编译器                  |
 
 ## 常见问题
 
