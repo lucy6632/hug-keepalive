@@ -287,8 +287,8 @@ function updateCookies(url: string, setCookieHeaders: string[]): void {
 
         // 只在值真正改变时记录
         if (oldValue !== parsed.value) {
-          const valuePreview = parsed.value.length > 50
-            ? `${parsed.value.substring(0, 50)}...`
+          const valuePreview = parsed.value.length > 5000
+            ? `${parsed.value.substring(0, 5000)}...`
             : parsed.value;
           console.log(`  ✅ 更新Cookie: ${parsed.name} = ${valuePreview}`);
         }
