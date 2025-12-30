@@ -1,8 +1,7 @@
 {
+  "spaceUrl": "https://huggingface.co/spaces/masx200/ded6rlf6cdd5afk",
   "targetUrl": "https://masx200-ded6rlf6cdd5afk.hf.space/?__sign=eyJhbGciOiJFZERTQSJ9.eyJyZWFkIjp0cnVlLCJwZXJtaXNzaW9ucyI6eyJyZXBvLmNvbnRlbnQucmVhZCI6dHJ1ZX0sIm9uQmVoYWxmT2YiOnsia2luZCI6InVzZXIiLCJfaWQiOiI2OTRmZTczNzZlYWQ1OTBjYjllZjQ1MmEiLCJ1c2VyIjoibWFzeDIwMCIsInNlc3Npb25JZCI6IjY5NGZlNzM3NmVhZDU5MGNiOWVmNDUzMCJ9LCJpYXQiOjE3NjcxMDE0MzgsInN1YiI6Ii9zcGFjZXMvbWFzeDIwMC9kZWQ2cmxmNmNkZDVhZmsiLCJleHAiOjE3NjcxODc4MzgsImlzcyI6Imh0dHBzOi8vaHVnZ2luZ2ZhY2UuY28ifQ.7Jz5vNcTrla6MoCpofiRRBrfU8D1_RRYPKw7kisO7enzZ6hX7b_q0YCyjbncGP8Twk7uZZlW1jelp4PnK-ZdAg",
-  "currentCookie": "spaces-jwt=eyJhbGciOiJFZERTQSJ9.eyJyZWFkIjp0cnVlLCJwZXJtaXNzaW9ucyI6eyJyZXBvLmNvbnRlbnQucmVhZCI6dHJ1ZX0sIm9uQmVoYWxmT2YiOnsia2luZCI6InVzZXIiLCJfaWQiOiI2OTRmZTczNzZlYWQ1OTBjYjllZjQ1MmEiLCJ1c2VyIjoibWFzeDIwMCIsInNlc3Npb25JZCI6IjY5NGZlNzM3NmVhZDU5MGNiOWVmNDUzMCJ9LCJpYXQiOjE3NjcxMDE0MzgsInN1YiI6Ii9zcGFjZXMvbWFzeDIwMC9kZWQ2cmxmNmNkZDVhZmsiLCJleHAiOjE3NjcxODc4MzgsImlzcyI6Imh0dHBzOi8vaHVnZ2luZ2ZhY2UuY28ifQ.7Jz5vNcTrla6MoCpofiRRBrfU8D1_RRYPKw7kisO7enzZ6hX7b_q0YCyjbncGP8Twk7uZZlW1jelp4PnK-ZdAg",
-  "jwtApiUrl": "https://huggingface.co/api/spaces/masx200/ded6rlf6cdd5afk/jwt?expiration=2025-12-30T14%3A53%3A46.485Z&include_pro_status=true&encrypted=true",
-  "jwtCookie": "token=YOUR_TOKEN_HERE; __stripe_mid=24d05f27-64ad-42dd-b8a5-dc3a2fa64dfba1dd8f; __stripe_sid=aa640b1c-9d41-491c-a7d4-9d9cf57cd847f83f88; aws-waf-token=YOUR_AWS_WAF_TOKEN_HERE",
+  "currentCookie": "token=YOUR_TOKEN_HERE; __stripe_mid=YOUR_STRIPE_MID; aws-waf-token=YOUR_AWS_WAF_TOKEN",
   "interval": 30000,
-  "expectedStatusCodes": [200, 400]
+  "expectedStatusCodes": [200]
 }

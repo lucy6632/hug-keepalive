@@ -1,8 +1,7 @@
 {
+  "spaceUrl": "https://huggingface.co/spaces/username/space-name",
   "targetUrl": "https://your-space.hf.space/?__sign=YOUR_INITIAL_TOKEN",
-  "currentCookie": "spaces-jwt=YOUR_INITIAL_SPACES_JWT",
-  "jwtApiUrl": "https://huggingface.co/api/spaces/YOUR_USERNAME/YOUR_SPACE_NAME/jwt?expiration=EXPIRATION_DATE&include_pro_status=true&encrypted=true",
-  "jwtCookie": "token=YOUR_TOKEN_HERE; __stripe_mid=YOUR_STRIPE_MID; __stripe_sid=YOUR_STRIPE_SID; aws-waf-token=YOUR_AWS_WAF_TOKEN",
+  "currentCookie": "token=YOUR_TOKEN_HERE",
   "interval": 30000,
-  "expectedStatusCodes": [200, 400]
+  "expectedStatusCodes": [200]
 }

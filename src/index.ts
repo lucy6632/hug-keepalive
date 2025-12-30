@@ -3,28 +3,26 @@
  *
  * 功能：
  * - 定时每30秒访问指定的Hugging Face Space URL
+ * - 自动从Space页面提取iframe的真实URL
  * - 自动解析和刷新Cookie以维持会话
  * - 智能检测保活状态（成功/失败）
- * - 可选的JWT token自动刷新功能
  *
  * 使用方法：
- * 1. 本地运行：export TARGET_URL="..." && export CURRENT_COOKIE="..." && npm run dev
- * 2. Docker运行：docker run -e TARGET_URL=... -e CURRENT_COOKIE=... hf-keep-alive
+ * 1. 本地运行：export SPACE_URL="..." && export CURRENT_COOKIE="..." && npm run dev
+ * 2. Docker运行：docker run -e SPACE_URL=... -e CURRENT_COOKIE=... hf-keep-alive
  * 3. 配置文件：node dist/index.js --config config.json
  *
- * 可选环境变量：
- * - JWT_API_URL：JWT刷新API地址（如：https://huggingface.co/api/spaces/.../jwt?...）
- * - JWT_COOKIE：JWT刷新所需的Cookie（包含token等认证信息）
+ * 环境变量：
+ * - SPACE_URL：Hugging Face Space页面URL（如：https://huggingface.co/spaces/username/space-name）
+ * - CURRENT_COOKIE：访问Space所需的Cookie（包含token等认证信息）
  * - CONFIG_FILE：配置文件路径（JSON格式），优先级高于环境变量
  *
  * 配置文件格式（config.json）：
  * {
- *   "targetUrl": "https://...",
- *   "currentCookie": "spaces-jwt=...",
- *   "jwtApiUrl": "https://...",
- *   "jwtCookie": "token=...",
+ *   "spaceUrl": "https://huggingface.co/spaces/...",
+ *   "currentCookie": "token=...",
  *   "interval": 30000,
- *   "expectedStatusCodes": [200, 400]
+ *   "expectedStatusCodes": [200]
  * }
  */
 
@@ -33,26 +31,25 @@ import * as cookie from "cookie";
 import { env } from "process";
 import { readFileSync } from "fs";
 import { resolve } from "path";
+import * as cheerio from "cheerio";
 
 // ==================== 配置部分 ====================
 
 interface Config {
-  url: string;
+  spaceUrl: string;
+  targetUrl: string;
   cookie: string;
   interval: number;
   expectedStatusCodes: number[];
-  jwtApiUrl: string;
-  jwtCookie: string;
 }
 
 /**
  * 配置文件接口
  */
 interface ConfigFile {
+  spaceUrl?: string;
   targetUrl?: string;
   currentCookie?: string;
-  jwtApiUrl?: string;
-  jwtCookie?: string;
   interval?: number;
   expectedStatusCodes?: number[];
 }
@@ -69,10 +66,9 @@ function loadConfigFromFile(configPath: string): Partial<Config> {
     console.log(`✅ 成功读取配置文件：${resolvedPath}`);
 
     return {
-      url: configData.targetUrl,
-      cookie: configData.currentCookie,
-      jwtApiUrl: configData.jwtApiUrl || "",
-      jwtCookie: configData.jwtCookie || "",
+      spaceUrl: configData.spaceUrl || "",
+      targetUrl: configData.targetUrl || "",
+      cookie: configData.currentCookie || "",
       interval: configData.interval || 30000,
       expectedStatusCodes: configData.expectedStatusCodes || [200],
     };
@@ -105,15 +101,14 @@ const configFilePath = getConfigFilePath();
 const fileConfig = configFilePath ? loadConfigFromFile(configFilePath) : {};
 
 const CONFIG: Config = {
-  url: fileConfig.url || env.TARGET_URL || "",
+  spaceUrl: fileConfig.spaceUrl || env.SPACE_URL || "",
+  targetUrl: fileConfig.targetUrl || env.TARGET_URL || "",
   cookie: fileConfig.cookie || env.CURRENT_COOKIE || "",
   interval: fileConfig.interval || (env.INTERVAL ? parseInt(env.INTERVAL, 10) : 30000),
   expectedStatusCodes: fileConfig.expectedStatusCodes ||
     (env.EXPECTED_STATUS_CODES
       ? env.EXPECTED_STATUS_CODES.split(",").map((code) => parseInt(code, 10))
       : [200]),
-  jwtApiUrl: fileConfig.jwtApiUrl || env.JWT_API_URL || "",
-  jwtCookie: fileConfig.jwtCookie || env.JWT_COOKIE || "",
 };
 
 // 失败检测标记
@@ -128,26 +123,41 @@ const FAILURE_MARKERS = [
  * 验证必要的环境变量
  */
 function validateConfig(): void {
-  if (!CONFIG.url) {
-    console.error("❌ 错误：未设置 TARGET_URL 环境变量");
+  if (!CONFIG.spaceUrl && !CONFIG.targetUrl) {
+    console.error("❌ 错误：未设置 SPACE_URL 或 TARGET_URL 环境变量");
     console.error(
-      '请设置：export TARGET_URL="https://your-space.hf.space/..."',
+      '请设置：export SPACE_URL="https://huggingface.co/spaces/username/space-name"',
+    );
+    console.error(
+      '或设置：export TARGET_URL="https://your-space.hf.space/..."',
     );
     process.exit(1);
   }
 
   if (!CONFIG.cookie) {
     console.error("❌ 错误：未设置 CURRENT_COOKIE 环境变量");
-    console.error('请设置：export CURRENT_COOKIE="spaces-jwt=..."');
+    console.error('请设置：export CURRENT_COOKIE="token=..."');
     process.exit(1);
   }
 
-  // 验证URL格式
-  try {
-    new URL(CONFIG.url);
-  } catch {
-    console.error("❌ 错误：TARGET_URL 格式无效");
-    process.exit(1);
+  // 验证SPACE_URL格式（如果设置了）
+  if (CONFIG.spaceUrl) {
+    try {
+      new URL(CONFIG.spaceUrl);
+    } catch {
+      console.error("❌ 错误：SPACE_URL 格式无效");
+      process.exit(1);
+    }
+  }
+
+  // 验证TARGET_URL格式（如果设置了）
+  if (CONFIG.targetUrl) {
+    try {
+      new URL(CONFIG.targetUrl);
+    } catch {
+      console.error("❌ 错误：TARGET_URL 格式无效");
+      process.exit(1);
+    }
   }
 }
 
@@ -160,40 +170,67 @@ interface CookieObject {
   [key: string]: string;
 }
 
-let cookieData: CookieObject = {};
+/**
+ * 按域名分组的 Cookie 存储
+ */
+interface CookieStorage {
+  [domain: string]: CookieObject;
+}
+
+// 存储所有域名的 Cookie
+let cookieStorage: CookieStorage = {};
+
+/**
+ * 从 URL 中提取域名
+ */
+function extractDomain(url: string): string {
+  try {
+    const urlObj = new URL(url);
+    return urlObj.hostname;
+  } catch {
+    return "";
+  }
+}
 
 /**
  * 初始化Cookie
  */
 function initCookie(): void {
   try {
-    // 合并主cookie和JWT cookie
-    const allCookieStrings: string[] = [];
+    // 为每个配置的 URL 初始化 Cookie
+    const urls: string[] = [];
+    if (CONFIG.spaceUrl) urls.push(CONFIG.spaceUrl);
+    if (CONFIG.targetUrl) urls.push(CONFIG.targetUrl);
 
-    if (CONFIG.cookie) {
-      allCookieStrings.push(CONFIG.cookie);
+    // 去重
+    const uniqueDomains = new Set<string>();
+
+    for (const url of urls) {
+      const domain = extractDomain(url);
+      if (domain) {
+        uniqueDomains.add(domain);
+      }
     }
 
-    if (CONFIG.jwtCookie) {
-      allCookieStrings.push(CONFIG.jwtCookie);
-    }
+    // 为每个域名初始化相同的 Cookie
+    const parsed = cookie.parseCookie(CONFIG.cookie);
+    const cookieObj: CookieObject = {};
 
-    // 解析所有cookie字符串并合并
-    const mergedCookies: CookieObject = {};
+    Object.entries(parsed).forEach(([key, value]) => {
+      if (value !== undefined) {
+        cookieObj[key] = value;
+      }
+    });
 
-    for (const cookieStr of allCookieStrings) {
-      const parsed = cookie.parseCookie(cookieStr);
-      Object.entries(parsed).forEach(([key, value]) => {
-        if (value !== undefined) {
-          mergedCookies[key] = value;
-        }
-      });
-    }
-
-    cookieData = mergedCookies;
+    // 将 Cookie 存储到每个域名下
+    uniqueDomains.forEach((domain) => {
+      cookieStorage[domain] = { ...cookieObj };
+    });
 
     console.log("✅ Cookie解析成功");
-    console.log("🍪 解析后的Cookie内容：", JSON.stringify(cookieData, null, 2));
+    console.log("🍪 已为以下域名初始化 Cookie：");
+    console.log("   ", Object.keys(cookieStorage).join(", "));
+    console.log("🍪 Cookie内容：", JSON.stringify(cookieObj, null, 2));
   } catch (error) {
     console.error("❌ Cookie解析失败：", error);
     process.exit(1);
@@ -202,16 +239,37 @@ function initCookie(): void {
 
 /**
  * 将Cookie对象序列化为请求头格式
+ * @param url 目标 URL，用于选择对应域名的 Cookie
  */
-function serializeCookie(): string {
+function serializeCookie(url: string): string {
+  const domain = extractDomain(url);
+
+  if (!domain || !cookieStorage[domain]) {
+    // 如果没有找到对应域名的 Cookie，返回空字符串
+    return "";
+  }
+
   // 使用 stringifyCookie 将对象序列化为 Cookie header 字符串
-  return cookie.stringifyCookie(cookieData);
+  return cookie.stringifyCookie(cookieStorage[domain]);
 }
 
 /**
  * 更新Cookie（处理服务器返回的Set-Cookie头）
+ * @param url 请求的 URL，用于确定更新哪个域名的 Cookie
  */
-function updateCookies(setCookieHeaders: string[]): void {
+function updateCookies(url: string, setCookieHeaders: string[]): void {
+  const domain = extractDomain(url);
+
+  if (!domain) {
+    console.warn("⚠️ 无法从 URL 提取域名，跳过 Cookie 更新");
+    return;
+  }
+
+  // 如果该域名还没有 Cookie 存储，初始化一个
+  if (!cookieStorage[domain]) {
+    cookieStorage[domain] = {};
+  }
+
   for (const setCookieHeader of setCookieHeaders) {
     try {
       // 使用 parseSetCookie 解析 Set-Cookie header 字符串
@@ -219,110 +277,103 @@ function updateCookies(setCookieHeaders: string[]): void {
 
       // 提取有效的Cookie键值对
       if (parsed.name && parsed.value) {
-        cookieData[parsed.name] = parsed.value;
+        cookieStorage[domain][parsed.name] = parsed.value;
       }
     } catch (error) {
       console.warn("⚠️ 解析Set-Cookie失败：", setCookieHeader);
     }
   }
+
+  console.log(`🍪 已更新域名 [${domain}] 的 Cookie`);
 }
 
-// ==================== JWT Token 刷新 ====================
+// ==================== iframe URL 提取 ====================
 
 /**
- * JWT API 响应接口
+ * 从 Space 页面 HTML 中提取 iframe 的 src 属性
+ * @param html Space 页面的 HTML 内容
+ * @returns iframe 的 src URL，如果未找到则返回 null
  */
-interface JwtApiResponse {
-  token: string;
-  accessToken: string;
-  exp: number;
-  encryptedToken: {
-    encrypted: string;
-    keyId: string;
-  };
-}
+function extractIframeUrl(html: string): string | null {
+  try {
+    const $ = cheerio.load(html);
+    const iframe = $("iframe.space-iframe");
 
-/**
- * 刷新 JWT token
- * @returns 新的 token 字符串，如果刷新失败则返回 null
- */
-async function refreshJwtToken(): Promise<string | null> {
-  if (!CONFIG.jwtApiUrl || !CONFIG.jwtCookie) {
-    // 如果未配置JWT相关环境变量，跳过刷新
+    if (iframe.length === 0) {
+      console.warn("⚠️ 未找到 class='space-iframe' 的 iframe 元素");
+      return null;
+    }
+
+    const src = iframe.attr("src");
+    if (!src) {
+      console.warn("⚠️ iframe 元素没有 src 属性");
+      return null;
+    }
+
+    console.log(`✅ 成功提取 iframe URL：${src}`);
+    return src;
+  } catch (error) {
+    console.error("❌ 解析 HTML 失败：", error);
     return null;
   }
+}
 
+/**
+ * 从 Space 页面获取 iframe 的真实 URL
+ * @returns iframe 的 src URL，如果获取失败则返回 null
+ */
+async function getIframeUrl(): Promise<string | null> {
   const timestamp = getTimestamp();
 
   try {
-    console.log(`\n[${timestamp}] 🔑 正在刷新 JWT token...`);
-    console.log(`[${timestamp}] 🔑 JWT API URL：${CONFIG.jwtApiUrl}`);
+    console.log(`\n[${timestamp}] 🔄 正在访问 Space 页面：${CONFIG.spaceUrl}`);
 
-    // 发送GET请求到JWT API
-    const response = await request(CONFIG.jwtApiUrl, {
+    const cookieHeader = serializeCookie(CONFIG.spaceUrl);
+
+    const response = await request(CONFIG.spaceUrl, {
       headers: {
-        "accept": "*/*",
-        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "cookie": serializeCookie(), // 使用当前的cookie而不是固定的jwtCookie
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-origin",
+        "Cookie": cookieHeader,
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept":
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Cache-Control": "max-age=0",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
       },
       headersTimeout: 30000,
       bodyTimeout: 30000,
     });
 
-    // 处理JWT API返回的Cookie更新
+    // 处理服务器返回的Cookie更新
     const setCookieHeaders = response.headers["set-cookie"];
     if (setCookieHeaders && Array.isArray(setCookieHeaders)) {
-      console.log(`[${timestamp}] 🍪 检测到JWT API Cookie更新`);
-      updateCookies(setCookieHeaders);
+      console.log(`[${timestamp}] 🍪 检测到Cookie更新`);
+      updateCookies(CONFIG.spaceUrl, setCookieHeaders);
     }
 
-    // 读取响应体
-    const responseBody = await response.body.text();
+    const html = await response.body.text();
 
     if (response.statusCode !== 200) {
-      console.error(`[${timestamp}] ❌ JWT token刷新失败：HTTP ${response.statusCode}`);
-      console.error(`[${timestamp}] 响应：${responseBody.substring(0, 200)}...`);
+      console.error(`[${timestamp}] ❌ 获取 Space 页面失败：HTTP ${response.statusCode}`);
       return null;
     }
 
-    // 解析JSON响应
-    const jwtResponse: JwtApiResponse = JSON.parse(responseBody);
+    // 提取 iframe URL
+    const iframeUrl = extractIframeUrl(html);
 
-    console.log(`[${timestamp}] ✅ JWT token刷新成功`);
-    console.log(`[${timestamp}] 🔑 新token：${jwtResponse.token.substring(0, 50)}...`);
-
-    // 返回新的token
-    return jwtResponse.token;
+    return iframeUrl;
   } catch (error: unknown) {
     if (error instanceof Error) {
-      console.error(`[${timestamp}] ❌ JWT token刷新异常：${error.message}`);
+      console.error(`[${timestamp}] ❌ 获取 iframe URL 异常：${error.message}`);
     } else {
-      console.error(`[${timestamp}] ❌ JWT token刷新异常：${String(error)}`);
+      console.error(`[${timestamp}] ❌ 获取 iframe URL 异常：${String(error)}`);
     }
     return null;
-  }
-}
-
-/**
- * 更新URL中的__sign参数
- * @param url 原始URL
- * @param token 新的JWT token
- * @returns 更新后的URL
- */
-function updateUrlSignParam(url: string, token: string): string {
-  try {
-    const urlObj = new URL(url);
-
-    // 更新或添加__sign参数
-    urlObj.searchParams.set("__sign", token);
-
-    return urlObj.toString();
-  } catch (error) {
-    console.error("⚠️ 更新URL参数失败：", error);
-    return url;
   }
 }
 
@@ -351,20 +402,30 @@ async function keepAlive(): Promise<void> {
   const timestamp = getTimestamp();
 
   try {
-    // 如果配置了JWT相关参数，先刷新token
-    let targetUrl = CONFIG.url;
-    if (CONFIG.jwtApiUrl && CONFIG.jwtCookie) {
-      const newToken = await refreshJwtToken();
-      if (newToken) {
-        targetUrl = updateUrlSignParam(CONFIG.url, newToken);
-        console.log(`[${timestamp}] 🔗 已更新URL的__sign参数`);
+    let targetUrl: string | null = null;
+
+    // 优先从 Space 页面获取 iframe URL
+    if (CONFIG.spaceUrl) {
+      const iframeUrl = await getIframeUrl();
+      if (iframeUrl) {
+        targetUrl = iframeUrl;
+      }
+    }
+
+    // 如果无法从 Space 页面获取 URL，使用 TARGET_URL 作为备用
+    if (!targetUrl) {
+      if (CONFIG.targetUrl) {
+        console.log(`[${timestamp}] ⚠️ 无法从 Space 页面提取 iframe URL，使用备用 TARGET_URL`);
+        targetUrl = CONFIG.targetUrl;
+      } else {
+        console.error(`[${timestamp}] ❌ 无法获取 iframe URL 且未配置 TARGET_URL，跳过本次保活`);
+        return;
       }
     }
 
     console.log(`\n[${timestamp}] 🔄 正在访问：${targetUrl}`);
 
-    const cookieHeader = serializeCookie();
-    console.log(`[${timestamp}] 🍪 发送的Cookie：${cookieHeader}`);
+    const cookieHeader = serializeCookie(targetUrl);
 
     // 发送GET请求
     const response = await request(targetUrl, {
@@ -384,7 +445,7 @@ async function keepAlive(): Promise<void> {
     const setCookieHeaders = response.headers["set-cookie"];
     if (setCookieHeaders && Array.isArray(setCookieHeaders)) {
       console.log(`[${timestamp}] 🍪 检测到Cookie更新`);
-      updateCookies(setCookieHeaders);
+      updateCookies(targetUrl, setCookieHeaders);
     }
 
     // 读取响应体
@@ -438,8 +499,8 @@ async function keepAlive(): Promise<void> {
  */
 async function main(): Promise<void> {
   console.log("╔════════════════════════════════════════════════════════════╗");
-  console.log("║   Hugging Face Space 自动保活工具 v1.0.0                   ║");
-  console.log("║   自动刷新Cookie，定时访问，保持服务活跃                   ║");
+  console.log("║   Hugging Face Space 自动保活工具 v2.0.0                   ║");
+  console.log("║   自动提取iframe URL，刷新Cookie，定时访问                 ║");
   console.log(
     "╚════════════════════════════════════════════════════════════╝\n",
   );
@@ -449,15 +510,14 @@ async function main(): Promise<void> {
 
   // 显示配置信息
   console.log("📋 配置信息：");
-  console.log(`   目标URL：${CONFIG.url}`);
+  if (CONFIG.spaceUrl) {
+    console.log(`   Space页面URL：${CONFIG.spaceUrl}`);
+  }
+  if (CONFIG.targetUrl) {
+    console.log(`   备用TARGET_URL：${CONFIG.targetUrl}`);
+  }
   console.log(`   刷新间隔：${CONFIG.interval / 1000}秒`);
   console.log(`   期望状态码：${CONFIG.expectedStatusCodes.join(", ")}`);
-  if (CONFIG.jwtApiUrl && CONFIG.jwtCookie) {
-    console.log(`   JWT刷新：已启用`);
-    console.log(`   JWT API URL：${CONFIG.jwtApiUrl}`);
-  } else {
-    console.log(`   JWT刷新：未配置（可选）`);
-  }
   console.log("");
 
   // 初始化Cookie
