@@ -354,8 +354,8 @@ async function pushToUptimeKuma(
 
     const response = await request(pushUrl.toString(), {
       method: "GET",
-      headersTimeout: 10000,
-      bodyTimeout: 10000,
+      headersTimeout: 20000,
+      bodyTimeout: 20000,
     });
 
     const responseBody = await response.body.text();
