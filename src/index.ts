@@ -41,6 +41,10 @@ interface Config {
   cookie: string;
   interval: number;
   expectedStatusCodes: number[];
+  uptimeKuma?: {
+    pushUrl: string;
+    enabled: boolean;
+  };
 }
 
 /**
@@ -52,6 +56,8 @@ interface ConfigFile {
   currentCookie?: string;
   interval?: number;
   expectedStatusCodes?: number[];
+  uptimeKumaPushUrl?: string;
+  uptimeKumaEnabled?: boolean;
 }
 
 /**
@@ -71,6 +77,12 @@ function loadConfigFromFile(configPath: string): Partial<Config> {
       cookie: configData.currentCookie || "",
       interval: configData.interval || 30000,
       expectedStatusCodes: configData.expectedStatusCodes || [200],
+      uptimeKuma: configData.uptimeKumaPushUrl
+        ? {
+          pushUrl: configData.uptimeKumaPushUrl,
+          enabled: configData.uptimeKumaEnabled ?? true,
+        }
+        : undefined,
     };
   } catch (error) {
     if (error instanceof Error) {
@@ -110,6 +122,12 @@ const CONFIG: Config = {
     (env.EXPECTED_STATUS_CODES
       ? env.EXPECTED_STATUS_CODES.split(",").map((code) => parseInt(code, 10))
       : [200]),
+  uptimeKuma: fileConfig.uptimeKuma || (env.UPTIME_KUMA_PUSH_URL
+    ? {
+      pushUrl: env.UPTIME_KUMA_PUSH_URL,
+      enabled: env.UPTIME_KUMA_ENABLED !== "false",
+    }
+    : undefined),
 };
 
 // 失败检测标记
@@ -304,6 +322,67 @@ function updateCookies(url: string, setCookieHeaders: string[]): void {
   }
 }
 
+// ==================== Uptime Kuma 推送 ====================
+
+/**
+ * 推送状态到 Uptime Kuma
+ * @param status 服务状态: "up" 或 "down"
+ * @param msg 状态消息
+ * @param ping 响应时间（毫秒）
+ */
+async function pushToUptimeKuma(
+  status: "up" | "down",
+  msg: string,
+  ping?: number,
+): Promise<void> {
+  if (!CONFIG.uptimeKuma || !CONFIG.uptimeKuma.enabled) {
+    return; // 未启用 Uptime Kuma
+  }
+
+  const timestamp = getTimestamp();
+
+  try {
+    const pushUrl = new URL(CONFIG.uptimeKuma.pushUrl);
+    pushUrl.searchParams.set("status", status);
+    pushUrl.searchParams.set("msg", msg);
+
+    if (ping !== undefined) {
+      pushUrl.searchParams.set("ping", ping.toString());
+    }
+
+    console.log(`[${timestamp}] 📊 推送到 Uptime Kuma：${status}`);
+
+    const response = await request(pushUrl.toString(), {
+      method: "GET",
+      headersTimeout: 10000,
+      bodyTimeout: 10000,
+    });
+
+    const responseBody = await response.body.text();
+
+    if (response.statusCode === 200) {
+      const result = JSON.parse(responseBody);
+      if (result.ok) {
+        console.log(`[${timestamp}] ✅ Uptime Kuma 推送成功`);
+      } else {
+        console.warn(
+          `[${timestamp}] ⚠️ Uptime Kuma 推送失败：${result.msg || "未知错误"}`,
+        );
+      }
+    } else {
+      console.warn(
+        `[${timestamp}] ⚠️ Uptime Kuma 推送失败：HTTP ${response.statusCode}`,
+      );
+    }
+  } catch (error: unknown) {
+    if (error instanceof Error) {
+      console.warn(`[${timestamp}] ⚠️ Uptime Kuma 推送异常：${error.message}`);
+    } else {
+      console.warn(`[${timestamp}] ⚠️ Uptime Kuma 推送异常：${String(error)}`);
+    }
+  }
+}
+
 // ==================== iframe URL 提取 ====================
 
 /**
@@ -424,6 +503,7 @@ function getTimestamp(): string {
  */
 async function keepAlive(): Promise<void> {
   const timestamp = getTimestamp();
+  const startTime = Date.now();
 
   try {
     let targetUrl: string | null = null;
@@ -447,6 +527,7 @@ async function keepAlive(): Promise<void> {
         console.error(
           `[${timestamp}] ❌ 无法获取 iframe URL 且未配置 TARGET_URL，跳过本次保活`,
         );
+        await pushToUptimeKuma("down", "无法获取目标 URL");
         return;
       }
     }
@@ -468,6 +549,9 @@ async function keepAlive(): Promise<void> {
       headersTimeout: 30000, // 30秒超时
       bodyTimeout: 30000,
     });
+
+    // 计算响应时间
+    const responseTime = Date.now() - startTime;
 
     // 处理服务器返回的Cookie更新
     const setCookieHeaders = response.headers["set-cookie"];
@@ -494,6 +578,10 @@ async function keepAlive(): Promise<void> {
       console.error(`[${timestamp}] ❌ 保活失败：检测到失败标记`);
       console.error(`[${timestamp}] HTTP状态码：${response.statusCode}`);
       console.error(`[${timestamp}] 失败原因：页面不存在或服务已失效`);
+      await pushToUptimeKuma(
+        "down",
+        `保活失败：检测到失败标记 (HTTP ${response.statusCode})`,
+      );
     } else if (!isExpectedStatusCode) {
       console.warn(
         `[${timestamp}] ⚠️ 收到非预期状态码：${response.statusCode}`,
@@ -504,10 +592,16 @@ async function keepAlive(): Promise<void> {
       console.warn(
         `[${timestamp}] 响应体：${responseBody.substring(0, 200)}...`,
       );
+      await pushToUptimeKuma(
+        "down",
+        `非预期状态码：${response.statusCode}`,
+        responseTime,
+      );
     } else {
       console.log(
-        `[${timestamp}] ✅ 保活成功：HTTP状态码 ${response.statusCode}`,
+        `[${timestamp}] ✅ 保活成功：HTTP状态码 ${response.statusCode} (${responseTime}ms)`,
       );
+      await pushToUptimeKuma("up", "OK", responseTime);
     }
   } catch (error: unknown) {
     if (error instanceof Error) {
@@ -516,13 +610,17 @@ async function keepAlive(): Promise<void> {
         error.name === "BodyTimeoutError"
       ) {
         console.error(`[${timestamp}] ⚠️ 请求超时：超过30秒未响应`);
+        await pushToUptimeKuma("down", "请求超时");
       } else if ((error as any).code === "UND_ERR_CONNECT") {
         console.error(`[${timestamp}] ⚠️ 网络错误：无法连接到服务器`);
+        await pushToUptimeKuma("down", "网络错误：无法连接");
       } else {
         console.error(`[${timestamp}] ⚠️ 未知错误：${error.message}`);
+        await pushToUptimeKuma("down", `未知错误：${error.message}`);
       }
     } else {
       console.error(`[${timestamp}] ⚠️ 未知错误：${String(error)}`);
+      await pushToUptimeKuma("down", "未知错误");
     }
   }
 }
@@ -553,6 +651,16 @@ async function main(): Promise<void> {
   }
   console.log(`   刷新间隔：${CONFIG.interval / 1000}秒`);
   console.log(`   期望状态码：${CONFIG.expectedStatusCodes.join(", ")}`);
+  if (CONFIG.uptimeKuma) {
+    if (CONFIG.uptimeKuma.enabled) {
+      console.log(`   Uptime Kuma推送：✅ 已启用`);
+      console.log(`   推送URL：${CONFIG.uptimeKuma.pushUrl}`);
+    } else {
+      console.log(`   Uptime Kuma推送：❌ 已禁用`);
+    }
+  } else {
+    console.log(`   Uptime Kuma推送：❌ 未配置`);
+  }
   console.log("");
 
   // 初始化Cookie

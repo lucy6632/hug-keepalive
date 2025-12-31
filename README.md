@@ -14,6 +14,7 @@ Cookie，有效防止服务因长时间无访问而进入休眠状态。
 - **Docker 容器化**：提供完整的 Dockerfile，支持容器化部署
 - **TypeScript 开发**：类型安全，代码可维护性高
 - **详细日志**：带有时间戳的彩色日志输出，便于监控和调试
+- **Uptime Kuma 集成**：可选的 Uptime Kuma Push API 集成，实时推送监控状态
 
 ## 工作原理
 
@@ -39,7 +40,9 @@ Cookie，有效防止服务因长时间无访问而进入休眠状态。
   "targetUrl": "https://your-space.hf.space/?__sign=YOUR_INITIAL_TOKEN",
   "currentCookie": "spaces-jwt=YOUR_SPACES_JWT",
   "interval": 30000,
-  "expectedStatusCodes": [200, 400]
+  "expectedStatusCodes": [200, 400],
+  "uptimeKumaPushUrl": "https://your-uptime-kuma.com/api/push/PUSH_TOKEN",
+  "uptimeKumaEnabled": true
 }
 ```
 
@@ -67,6 +70,7 @@ pnpm install
 # 设置环境变量并运行
 export SPACE_URL="https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE"
 export CURRENT_COOKIE="spaces-jwt=eyJhbGciOiJFZERTQSJ9..."
+export UPTIME_KUMA_PUSH_URL="https://your-uptime-kuma.com/api/push/PUSH_TOKEN"
 pnpm dev
 ```
 
@@ -93,6 +97,7 @@ docker run -d \
   --name hf-keep-alive-container \
   -e SPACE_URL="https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE" \
   -e CURRENT_COOKIE="spaces-jwt=eyJhbGciOiJFZERTQSJ9..." \
+  -e UPTIME_KUMA_PUSH_URL="https://your-uptime-kuma.com/api/push/PUSH_TOKEN" \
   hf-keep-alive
 
 # 或使用配置文件
@@ -123,6 +128,7 @@ services:
     environment:
       - SPACE_URL=https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE
       - CURRENT_COOKIE=spaces-jwt=eyJhbGciOiJFZERTQSJ9...
+      - UPTIME_KUMA_PUSH_URL=https://your-uptime-kuma.com/api/push/PUSH_TOKEN
 ```
 
 启动服务：
@@ -144,6 +150,8 @@ docker-compose logs -f
 | `INTERVAL`              | 请求间隔时间（毫秒），最小值为 10000                  | 否       | 30000  |
 | `EXPECTED_STATUS_CODES` | 期望的 HTTP 状态码列表，多个用逗号分隔                | 否       | `200`  |
 | `CONFIG_FILE`           | 配置文件路径                                          | 否       | 无     |
+| `UPTIME_KUMA_PUSH_URL`  | Uptime Kuma Push API 的完整 URL                       | 否       | 无     |
+| `UPTIME_KUMA_ENABLED`   | 是否启用 Uptime Kuma 推送（true/false）               | 否       | true   |
 
 *注意：`SPACE_URL` 和 `TARGET_URL` 至少需要设置一个。如果设置了
 `SPACE_URL`，工具会自动从页面提取 iframe URL 进行访问。
@@ -157,6 +165,8 @@ docker-compose logs -f
 | `currentCookie`       | 当前的 Cookie 字符串                | 是       | 无     |
 | `interval`            | 请求间隔时间（毫秒）                | 否       | 30000  |
 | `expectedStatusCodes` | 期望的 HTTP 状态码数组              | 否       | [200]  |
+| `uptimeKumaPushUrl`   | Uptime Kuma Push API URL            | 否       | 无     |
+| `uptimeKumaEnabled`   | 是否启用 Uptime Kuma 推送           | 否       | true   |
 
 *注意：`spaceUrl` 和 `targetUrl` 至少需要设置一个。推荐设置
 `spaceUrl`，让工具自动提取 iframe URL。
@@ -165,6 +175,107 @@ docker-compose logs -f
 
 - 设置单个状态码：`export EXPECTED_STATUS_CODES=200`
 - 设置多个状态码：`export EXPECTED_STATUS_CODES=200,301,302`
+
+## Uptime Kuma 集成
+
+本工具支持将保活状态推送到
+[Uptime Kuma](https://github.com/louislam/uptime-kuma) 监控系统。Uptime Kuma
+是一个精美的自托管监控工具，类似于 Uptime Robot。
+
+### 功能说明
+
+- **实时状态推送**：每次保活请求后自动推送状态到 Uptime Kuma
+- **响应时间监控**：包含请求响应时间（毫秒）
+- **失败通知**：保活失败时自动推送 down 状态
+- **可选配置**：完全可选的功能，不影响基础保活功能
+
+### 配置步骤
+
+#### 1. 在 Uptime Kuma 中创建 Push 监控
+
+1. 登录 Uptime Kuma
+2. 点击 "Add New Monitor"
+3. 选择 "Push" 类型
+4. 配置监控名称和其他设置
+5. 保存后，复制 Push
+   URL（格式：`https://your-uptime-kuma.com/api/push/PUSH_TOKEN?status=up&msg=ok&ping=`）
+
+#### 2. 配置工具
+
+**方式一：使用环境变量**
+
+```bash
+export UPTIME_KUMA_PUSH_URL="https://your-uptime-kuma.com/api/push/PUSH_TOKEN"
+export UPTIME_KUMA_ENABLED="true"  # 可选，默认为 true
+```
+
+**方式二：使用配置文件**
+
+```json
+{
+  "spaceUrl": "https://huggingface.co/spaces/YOUR_USERNAME/YOUR_SPACE",
+  "currentCookie": "spaces-jwt=YOUR_SPACES_JWT",
+  "uptimeKumaPushUrl": "https://your-uptime-kuma.com/api/push/PUSH_TOKEN",
+  "uptimeKumaEnabled": true
+}
+```
+
+#### 3. 禁用 Uptime Kuma 推送
+
+如果需要临时禁用推送功能：
+
+**环境变量方式**：
+
+```bash
+export UPTIME_KUMA_ENABLED="false"
+```
+
+**配置文件方式**：
+
+```json
+{
+  "uptimeKumaPushUrl": "https://your-uptime-kuma.com/api/push/PUSH_TOKEN",
+  "uptimeKumaEnabled": false
+}
+```
+
+### 推送状态说明
+
+工具会根据保活结果推送以下状态：
+
+| 保活状态     | Uptime Kuma 状态 | 消息示例                              |
+| ------------ | ---------------- | ------------------------------------- |
+| 成功         | up               | `OK` + 响应时间                       |
+| 失败标记检测 | down             | `保活失败：检测到失败标记 (HTTP 404)` |
+| 非预期状态码 | down             | `非预期状态码：500` + 响应时间        |
+| 请求超时     | down             | `请求超时`                            |
+| 网络错误     | down             | `网络错误：无法连接`                  |
+| 其他错误     | down             | `未知错误：...`                       |
+
+### 日志示例
+
+启用 Uptime Kuma 后的日志输出：
+
+```
+📋 配置信息：
+   Space页面URL：https://huggingface.co/spaces/username/space-name
+   刷新间隔：30秒
+   期望状态码：200
+   Uptime Kuma推送：✅ 已启用
+   推送URL：https://your-uptime-kuma.com/api/push/PUSH_TOKEN
+
+[2024-12-30T21:00:00.000Z] 🔄 正在访问：https://username-space.hf.space/...
+[2024-12-30T21:00:00.500Z] ✅ 保活成功：HTTP状态码 200 (500ms)
+[2024-12-30T21:00:00.600Z] 📊 推送到 Uptime Kuma：up
+[2024-12-30T21:00:00.800Z] ✅ Uptime Kuma 推送成功
+```
+
+### 注意事项
+
+1. **网络连接**：确保运行环境能够访问 Uptime Kuma 服务器
+2. **推送频率**：推送频率与保活间隔一致（默认 30 秒）
+3. **错误处理**：推送失败不会影响保活功能，会在日志中显示警告
+4. **Push Token 安全**：请妥善保管 Push URL，不要泄露到公开仓库
 
 ## 获取 Cookie 和 URL
 
