@@ -10,6 +10,7 @@ Cookie，有效防止服务因长时间无访问而进入休眠状态。
 - **智能 Cookie 管理**：自动解析和更新 Cookie，处理服务器返回的会话刷新
 - **自动提取 iframe URL**：从 Space 页面自动提取真实的 iframe URL
 - **失败检测**：内置双重失败检测机制，通过检测页面内容判断服务状态
+- **自动重试**：请求失败时自动重试，默认最多重试 5 次，每次重试间隔 2 秒
 - **配置文件支持**：支持通过 JSON 配置文件启动，优先级高于环境变量
 - **Docker 容器化**：提供完整的 Dockerfile，支持容器化部署
 - **TypeScript 开发**：类型安全，代码可维护性高
@@ -41,6 +42,7 @@ Cookie，有效防止服务因长时间无访问而进入休眠状态。
   "currentCookie": "spaces-jwt=YOUR_SPACES_JWT",
   "interval": 30000,
   "expectedStatusCodes": [200, 400],
+  "maxRetries": 5,
   "uptimeKumaPushUrl": "https://your-uptime-kuma.com/api/push/PUSH_TOKEN",
   "uptimeKumaEnabled": true
 }
@@ -147,6 +149,7 @@ docker-compose logs -f
 | `SPACE_URL`             | Hugging Face Space 页面 URL                           | 否*      | 无     |
 | `TARGET_URL`            | 要保活的完整 Hugging Face Space URL，包含所有查询参数 | 否*      | 无     |
 | `CURRENT_COOKIE`        | 当前的 Cookie 字符串（通常是 `spaces-jwt=...` 格式）  | 是       | 无     |
+| `MAX_RETRIES`           | 请求失败时的最大重试次数                              | 否       | 5      |
 | `INTERVAL`              | 请求间隔时间（毫秒），最小值为 10000                  | 否       | 30000  |
 | `EXPECTED_STATUS_CODES` | 期望的 HTTP 状态码列表，多个用逗号分隔                | 否       | `200`  |
 | `CONFIG_FILE`           | 配置文件路径                                          | 否       | 无     |

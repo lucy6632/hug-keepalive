@@ -41,6 +41,7 @@ interface Config {
   cookie: string;
   interval: number;
   expectedStatusCodes: number[];
+  maxRetries: number;
   uptimeKuma?: {
     pushUrl: string;
     enabled: boolean;
@@ -56,6 +57,7 @@ interface ConfigFile {
   currentCookie?: string;
   interval?: number;
   expectedStatusCodes?: number[];
+  maxRetries?: number;
   uptimeKumaPushUrl?: string;
   uptimeKumaEnabled?: boolean;
 }
@@ -77,6 +79,7 @@ function loadConfigFromFile(configPath: string): Partial<Config> {
       cookie: configData.currentCookie || "",
       interval: configData.interval || 30000,
       expectedStatusCodes: configData.expectedStatusCodes || [200],
+      maxRetries: configData.maxRetries ?? 5,
       uptimeKuma: configData.uptimeKumaPushUrl
         ? {
           pushUrl: configData.uptimeKumaPushUrl,
@@ -122,6 +125,8 @@ const CONFIG: Config = {
     (env.EXPECTED_STATUS_CODES
       ? env.EXPECTED_STATUS_CODES.split(",").map((code) => parseInt(code, 10))
       : [200]),
+  maxRetries: fileConfig.maxRetries ??
+    (env.MAX_RETRIES ? parseInt(env.MAX_RETRIES, 10) : 5),
   uptimeKuma: fileConfig.uptimeKuma || (env.UPTIME_KUMA_PUSH_URL
     ? {
       pushUrl: env.UPTIME_KUMA_PUSH_URL,
@@ -502,127 +507,190 @@ function getTimestamp(): string {
  * 执行一次保活请求
  */
 async function keepAlive(): Promise<void> {
-  const timestamp = getTimestamp();
-  const startTime = Date.now();
+  let lastError: Error | null = null;
 
-  try {
-    let targetUrl: string | null = null;
+  // 重试循环
+  for (let attempt = 1; attempt <= CONFIG.maxRetries; attempt++) {
+    const timestamp = getTimestamp();
+    const startTime = Date.now();
+    const attemptLabel = attempt > 1 ? `[重试 ${attempt}/${CONFIG.maxRetries}] ` : "";
 
-    // 优先从 Space 页面获取 iframe URL
-    if (CONFIG.spaceUrl) {
-      const iframeUrl = await getIframeUrl();
-      if (iframeUrl) {
-        targetUrl = iframeUrl;
+    try {
+      let targetUrl: string | null = null;
+
+      // 优先从 Space 页面获取 iframe URL
+      if (CONFIG.spaceUrl) {
+        const iframeUrl = await getIframeUrl();
+        if (iframeUrl) {
+          targetUrl = iframeUrl;
+        }
       }
-    }
 
-    // 如果无法从 Space 页面获取 URL，使用 TARGET_URL 作为备用
-    if (!targetUrl) {
-      if (CONFIG.targetUrl) {
-        console.log(
-          `[${timestamp}] ⚠️ 无法从 Space 页面提取 iframe URL，使用备用 TARGET_URL`,
+      // 如果无法从 Space 页面获取 URL，使用 TARGET_URL 作为备用
+      if (!targetUrl) {
+        if (CONFIG.targetUrl) {
+          console.log(
+            `[${timestamp}] ${attemptLabel}⚠️ 无法从 Space 页面提取 iframe URL，使用备用 TARGET_URL`,
+          );
+          targetUrl = CONFIG.targetUrl;
+        } else {
+          console.error(
+            `[${timestamp}] ${attemptLabel}❌ 无法获取 iframe URL 且未配置 TARGET_URL，跳过本次保活`,
+          );
+          await pushToUptimeKuma("down", "无法获取目标 URL");
+          return;
+        }
+      }
+
+      console.log(`\n[${timestamp}] ${attemptLabel}🔄 正在访问：${targetUrl}`);
+
+      const cookieHeader = serializeCookie(targetUrl);
+
+      // 发送GET请求
+      const response = await request(targetUrl, {
+        headers: {
+          "Cookie": cookieHeader,
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept":
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.5",
+        },
+        headersTimeout: 30000, // 30秒超时
+        bodyTimeout: 30000,
+      });
+
+      // 计算响应时间
+      const responseTime = Date.now() - startTime;
+
+      // 处理服务器返回的Cookie更新
+      const setCookieHeaders = response.headers["set-cookie"];
+      if (setCookieHeaders) {
+        // undici 可能返回 string 或 string[]
+        const headers = Array.isArray(setCookieHeaders)
+          ? setCookieHeaders
+          : [setCookieHeaders];
+        if (headers.length > 0) {
+          updateCookies(targetUrl, headers);
+        }
+      }
+
+      // 读取响应体
+      const responseBody = await response.body.text();
+
+      // 检测失败标记
+      const hasFailureMarker = containsFailureMarker(responseBody);
+      const isExpectedStatusCode = CONFIG.expectedStatusCodes.includes(
+        response.statusCode,
+      );
+
+      if (hasFailureMarker) {
+        console.error(`[${timestamp}] ${attemptLabel}❌ 保活失败：检测到失败标记`);
+        console.error(`[${timestamp}] ${attemptLabel}HTTP状态码：${response.statusCode}`);
+        console.error(`[${timestamp}] ${attemptLabel}失败原因：页面不存在或服务已失效`);
+        lastError = new Error(`检测到失败标记 (HTTP ${response.statusCode})`);
+
+        if (attempt < CONFIG.maxRetries) {
+          console.log(`[${timestamp}] ${attemptLabel}等待2秒后重试...`);
+          await sleep(2000);
+          continue;
+        } else {
+          await pushToUptimeKuma(
+            "down",
+            `保活失败：检测到失败标记 (HTTP ${response.statusCode})`,
+          );
+          return;
+        }
+      } else if (!isExpectedStatusCode) {
+        console.warn(
+          `[${timestamp}] ${attemptLabel}⚠️ 收到非预期状态码：${response.statusCode}`,
         );
-        targetUrl = CONFIG.targetUrl;
+        console.warn(
+          `[${timestamp}] ${attemptLabel}期望状态码：${CONFIG.expectedStatusCodes.join(", ")}`,
+        );
+        console.warn(
+          `[${timestamp}] ${attemptLabel}响应体：${responseBody.substring(0, 200)}...`,
+        );
+        lastError = new Error(`非预期状态码：${response.statusCode}`);
+
+        if (attempt < CONFIG.maxRetries) {
+          console.log(`[${timestamp}] ${attemptLabel}等待2秒后重试...`);
+          await sleep(2000);
+          continue;
+        } else {
+          await pushToUptimeKuma(
+            "down",
+            `非预期状态码：${response.statusCode}`,
+            responseTime,
+          );
+          return;
+        }
       } else {
-        console.error(
-          `[${timestamp}] ❌ 无法获取 iframe URL 且未配置 TARGET_URL，跳过本次保活`,
+        const successLabel = attempt > 1 ? `[重试 ${attempt}/${CONFIG.maxRetries}] ` : "";
+        console.log(
+          `[${timestamp}] ${successLabel}✅ 保活成功：HTTP状态码 ${response.statusCode} (${responseTime}ms)`,
         );
-        await pushToUptimeKuma("down", "无法获取目标 URL");
+        await pushToUptimeKuma("up", "OK", responseTime);
         return;
       }
-    }
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        lastError = error;
+        if (
+          error.name === "HeadersTimeoutError" ||
+          error.name === "BodyTimeoutError"
+        ) {
+          console.error(`[${timestamp}] ${attemptLabel}⚠️ 请求超时：超过30秒未响应`);
+        } else if ((error as any).code === "UND_ERR_CONNECT") {
+          console.error(`[${timestamp}] ${attemptLabel}⚠️ 网络错误：无法连接到服务器`);
+        } else {
+          console.error(`[${timestamp}] ${attemptLabel}⚠️ 未知错误：${error.message}`);
+        }
 
-    console.log(`\n[${timestamp}] 🔄 正在访问：${targetUrl}`);
-
-    const cookieHeader = serializeCookie(targetUrl);
-
-    // 发送GET请求
-    const response = await request(targetUrl, {
-      headers: {
-        "Cookie": cookieHeader,
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept":
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-      },
-      headersTimeout: 30000, // 30秒超时
-      bodyTimeout: 30000,
-    });
-
-    // 计算响应时间
-    const responseTime = Date.now() - startTime;
-
-    // 处理服务器返回的Cookie更新
-    const setCookieHeaders = response.headers["set-cookie"];
-    if (setCookieHeaders) {
-      // undici 可能返回 string 或 string[]
-      const headers = Array.isArray(setCookieHeaders)
-        ? setCookieHeaders
-        : [setCookieHeaders];
-      if (headers.length > 0) {
-        updateCookies(targetUrl, headers);
-      }
-    }
-
-    // 读取响应体
-    const responseBody = await response.body.text();
-
-    // 检测失败标记
-    const hasFailureMarker = containsFailureMarker(responseBody);
-    const isExpectedStatusCode = CONFIG.expectedStatusCodes.includes(
-      response.statusCode,
-    );
-
-    if (hasFailureMarker) {
-      console.error(`[${timestamp}] ❌ 保活失败：检测到失败标记`);
-      console.error(`[${timestamp}] HTTP状态码：${response.statusCode}`);
-      console.error(`[${timestamp}] 失败原因：页面不存在或服务已失效`);
-      await pushToUptimeKuma(
-        "down",
-        `保活失败：检测到失败标记 (HTTP ${response.statusCode})`,
-      );
-    } else if (!isExpectedStatusCode) {
-      console.warn(
-        `[${timestamp}] ⚠️ 收到非预期状态码：${response.statusCode}`,
-      );
-      console.warn(
-        `[${timestamp}] 期望状态码：${CONFIG.expectedStatusCodes.join(", ")}`,
-      );
-      console.warn(
-        `[${timestamp}] 响应体：${responseBody.substring(0, 200)}...`,
-      );
-      await pushToUptimeKuma(
-        "down",
-        `非预期状态码：${response.statusCode}`,
-        responseTime,
-      );
-    } else {
-      console.log(
-        `[${timestamp}] ✅ 保活成功：HTTP状态码 ${response.statusCode} (${responseTime}ms)`,
-      );
-      await pushToUptimeKuma("up", "OK", responseTime);
-    }
-  } catch (error: unknown) {
-    if (error instanceof Error) {
-      if (
-        error.name === "HeadersTimeoutError" ||
-        error.name === "BodyTimeoutError"
-      ) {
-        console.error(`[${timestamp}] ⚠️ 请求超时：超过30秒未响应`);
-        await pushToUptimeKuma("down", "请求超时");
-      } else if ((error as any).code === "UND_ERR_CONNECT") {
-        console.error(`[${timestamp}] ⚠️ 网络错误：无法连接到服务器`);
-        await pushToUptimeKuma("down", "网络错误：无法连接");
+        if (attempt < CONFIG.maxRetries) {
+          console.log(`[${timestamp}] ${attemptLabel}等待2秒后重试...`);
+          await sleep(2000);
+          continue;
+        } else {
+          if (
+            error.name === "HeadersTimeoutError" ||
+            error.name === "BodyTimeoutError"
+          ) {
+            await pushToUptimeKuma("down", "请求超时");
+          } else if ((error as any).code === "UND_ERR_CONNECT") {
+            await pushToUptimeKuma("down", "网络错误：无法连接");
+          } else {
+            await pushToUptimeKuma("down", `未知错误：${error.message}`);
+          }
+          return;
+        }
       } else {
-        console.error(`[${timestamp}] ⚠️ 未知错误：${error.message}`);
-        await pushToUptimeKuma("down", `未知错误：${error.message}`);
+        lastError = new Error(String(error));
+        console.error(`[${timestamp}] ${attemptLabel}⚠️ 未知错误：${String(error)}`);
+
+        if (attempt < CONFIG.maxRetries) {
+          console.log(`[${timestamp}] ${attemptLabel}等待2秒后重试...`);
+          await sleep(2000);
+          continue;
+        } else {
+          await pushToUptimeKuma("down", "未知错误");
+          return;
+        }
       }
-    } else {
-      console.error(`[${timestamp}] ⚠️ 未知错误：${String(error)}`);
-      await pushToUptimeKuma("down", "未知错误");
     }
   }
+
+  // 所有重试都失败
+  if (lastError) {
+    console.error(`[${getTimestamp()}] ❌ 所有重试均失败，已达到最大重试次数 (${CONFIG.maxRetries})`);
+  }
+}
+
+/**
+ * 延迟函数
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ==================== 主程序 ====================
@@ -651,6 +719,7 @@ async function main(): Promise<void> {
   }
   console.log(`   刷新间隔：${CONFIG.interval / 1000}秒`);
   console.log(`   期望状态码：${CONFIG.expectedStatusCodes.join(", ")}`);
+  console.log(`   最大重试次数：${CONFIG.maxRetries}次`);
   if (CONFIG.uptimeKuma) {
     if (CONFIG.uptimeKuma.enabled) {
       console.log(`   Uptime Kuma推送：✅ 已启用`);
