@@ -2,18 +2,18 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [ main ]  # 或你使用的主分支名，如 master
-  workflow_dispatch:    # 允许手动触发
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write  # 必须授权才能推送至 GHCR
+      packages: write
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
@@ -26,17 +26,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
+      - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}/nodewei:latest
+          images: ghcr.io/${{ github.repository_owner }}/hug-keepalive  # 自定义镜像名
           tags: |
+            type=raw,value=latest
             type=ref,event=branch
-            type=ref,event=pr
             type=sha,prefix={{branch}}-
 
-      - name: Build and push Docker image
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
